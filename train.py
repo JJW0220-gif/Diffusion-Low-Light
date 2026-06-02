@@ -11,7 +11,7 @@ import torchvision
 import models
 import datasets
 import utils
-from models import DenoisingDiffusion
+from models.ddm2 import DenoisingDiffusion
 
 
 def parse_args_and_config():

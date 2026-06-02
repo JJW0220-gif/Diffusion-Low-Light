@@ -26,14 +26,28 @@ Please refer to [[Project Page of RetinexNet.]](https://daooshee.github.io/BMVC2
 You can downlaod our pre-trained model from [[Google Drive]](https://drive.google.com/file/d/1f4zDvPsWKrID33OJdeHwc5VOBILkm0KW/view?usp=sharing) and [[Baidu Yun (extracted code:wsw7)]](https://pan.baidu.com/s/1rq8VzdnHeky0iT56coOGog)
 
 ## How to train?
-You need to modify ```datasets/dataset.py``` slightly for your environment, and then
+For the new paired WebP dataset, place the splits under a single root directory:
+
 ```
-python train.py  
+Diffusion-Low-Light/
+├── data/
+│   └── low-light/
+│       ├── train/
+│       ├── val/
+│       └── test/
+```
+
+Each file should follow `<stem>-in.webp` and `<stem>-gt.webp` for `train/` and `val/`, while `test/` contains only `<stem>-in.webp`.
+
+The provided config `configs/LowLightWebP.yml` assumes the dataset root is `./data/low-light`, so after placing the files there you can run:
+
+```
+python train.py --config LowLightWebP.yml
 ```
 
 ## How to test?
 ```
-python evaluate.py
+python evaluate.py --config LowLightWebP.yml
 ```
 
 ## Visual comparison

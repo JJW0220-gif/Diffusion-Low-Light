@@ -23,6 +23,8 @@ def parse_args_and_config():
                         help="Number of implicit sampling steps")
     parser.add_argument("--image_folder", default='results/test', type=str,
                         help="Location to save restored images")
+    parser.add_argument('--require_lpips', action='store_true',
+                        help='Fail evaluation if LPIPS is unavailable instead of silently skipping it')
     parser.add_argument('--seed', default=230, type=int, metavar='N',
                         help='Seed for initializing training (default: 230)')
     args = parser.parse_args()

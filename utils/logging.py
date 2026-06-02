@@ -17,7 +17,8 @@ def save_checkpoint(state, filename):
 
 
 def load_checkpoint(path, device):
+    load_kwargs = {"weights_only": False}
     if device is None:
-        return torch.load(path)
+        return torch.load(path, **load_kwargs)
     else:
-        return torch.load(path, map_location=device)
+        return torch.load(path, map_location=device, **load_kwargs)
