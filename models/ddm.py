@@ -252,6 +252,7 @@ class DenoisingDiffusion(object):
 
         self.optimizer, self.scheduler = utils.optimize.get_optimizer(self.config, self.model.parameters())
         self.start_epoch, self.step = 0, 0
+        self.best_val_loss = float('inf')
 
     def load_ddm_ckpt(self, load_path, ema=False):
         checkpoint = utils.logging.load_checkpoint(load_path, None)
@@ -264,9 +265,23 @@ class DenoisingDiffusion(object):
             self.scheduler.load_state_dict(checkpoint['scheduler'])
         self.start_epoch = checkpoint.get('epoch', 0)
         self.step = checkpoint.get('step', 0)
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         if ema:
             self.ema_helper.ema(self.model)
-        print("=> loaded checkpoint {} step {}".format(load_path, self.step))
+        print("=> loaded checkpoint {} step {} best_val_loss {:.6f}".format(load_path, self.step, self.best_val_loss))
+
+    def _checkpoint_state(self, epoch):
+        return {
+            'step': self.step,
+            'epoch': epoch + 1,
+            'best_val_loss': self.best_val_loss,
+            'state_dict': self.model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'ema_helper': self.ema_helper.state_dict(),
+            'params': self.args,
+            'config': self.config,
+        }
 
     def validate(self, val_loader):
         totals = {
@@ -349,6 +364,8 @@ class DenoisingDiffusion(object):
     def train(self, DATASET):
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
+        latest_ckpt_name = getattr(self.config.training, 'latest_ckpt_name', 'model_latest')
+        best_ckpt_name = getattr(self.config.training, 'best_ckpt_name', 'model_bestbest')
         loss_log_name = getattr(self.config.training, 'loss_log_name', 'loss_log_ddm.csv')
         loss_log_path = os.path.join(self.config.data.ckpt_dir, loss_log_name)
 
@@ -397,17 +414,40 @@ class DenoisingDiffusion(object):
                 data_start = time.time()
 
                 if self.step % self.config.training.validation_freq == 0 and self.step != 0:
-                    self.model.eval()
+                    val_losses = self.validate(val_loader)
+                    print("validation step:{}, total_loss:{:.4f}, noise_loss:{:.4f}, photo_loss:{:.4f}, frequency_loss:{:.4f}".format(
+                        self.step,
+                        val_losses['total_loss'],
+                        val_losses['noise_loss'],
+                        val_losses['photo_loss'],
+                        val_losses['frequency_loss'],
+                    ))
                     self.sample_validation_patches(val_loader, self.step)
 
-                    utils.logging.save_checkpoint({'step': self.step, 'epoch': epoch + 1,
-                                                   'state_dict': self.model.state_dict(),
-                                                   'optimizer': self.optimizer.state_dict(),
-                                                   'scheduler': self.scheduler.state_dict(),
-                                                   'ema_helper': self.ema_helper.state_dict(),
-                                                   'params': self.args,
-                                                   'config': self.config},
-                                                  filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
+                    is_best = val_losses['total_loss'] < self.best_val_loss
+                    if is_best:
+                        self.best_val_loss = val_losses['total_loss']
+
+                    checkpoint_state = self._checkpoint_state(epoch)
+                    utils.logging.save_checkpoint(
+                        checkpoint_state,
+                        filename=os.path.join(self.config.data.ckpt_dir, latest_ckpt_name)
+                    )
+
+                    if is_best:
+                        utils.logging.save_checkpoint(
+                            checkpoint_state,
+                            filename=os.path.join(self.config.data.ckpt_dir, best_ckpt_name)
+                        )
+                        print("=> saved new best checkpoint at step {} with val_loss {:.6f}".format(
+                            self.step,
+                            self.best_val_loss,
+                        ))
+                    else:
+                        print("=> saved latest; skipped best because val_loss {:.6f} did not beat best {:.6f}".format(
+                            val_losses['total_loss'],
+                            self.best_val_loss,
+                        ))
 
             self.scheduler.step()
 
