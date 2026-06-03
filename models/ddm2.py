@@ -359,7 +359,8 @@ class DenoisingDiffusion(object):
         train_loader, val_loader = DATASET.get_loaders()
         latest_ckpt_name = getattr(self.config.training, 'latest_ckpt_name', 'model_latest')
         best_ckpt_name = getattr(self.config.training, 'best_ckpt_name', 'model_bestbest')
-        loss_log_path = os.path.join(self.config.data.ckpt_dir, 'loss_log.csv')
+        loss_log_name = getattr(self.config.training, 'loss_log_name', 'loss_log_ddm2.csv')
+        loss_log_path = os.path.join(self.config.data.ckpt_dir, loss_log_name)
 
         if os.path.isfile(self.args.resume):
             self.load_ddm_ckpt(self.args.resume)

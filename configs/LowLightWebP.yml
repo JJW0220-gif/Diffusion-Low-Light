@@ -33,6 +33,7 @@ training:
     photo_mse_weight: 1.0
     photo_ssim_weight: 0.5
     lpips_weight: 0.05
+    loss_log_name: "loss_log_ddm2.csv"
 
 optim:
     weight_decay: 0.000

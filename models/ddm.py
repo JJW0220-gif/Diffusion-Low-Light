@@ -314,7 +314,8 @@ class DenoisingDiffusion(object):
     def train(self, DATASET):
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
-        loss_log_path = os.path.join(self.config.data.ckpt_dir, 'loss_log.csv')
+        loss_log_name = getattr(self.config.training, 'loss_log_name', 'loss_log_ddm.csv')
+        loss_log_path = os.path.join(self.config.data.ckpt_dir, loss_log_name)
 
         if os.path.isfile(self.args.resume):
             self.load_ddm_ckpt(self.args.resume)
