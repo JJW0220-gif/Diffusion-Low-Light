@@ -1,5 +1,6 @@
 import os
 import time
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -171,53 +172,55 @@ class Net(nn.Module):
         input_img_norm = data_transform(input_img)
         input_dwt = dwt(input_img_norm)
 
-        input_LL, input_high0 = input_dwt[:n, ...], input_dwt[n:, ...]
+        input_LL1, input_high0 = input_dwt[:n, ...], input_dwt[n:, ...]
 
         input_high0 = self.high_enhance0(input_high0)
 
-        input_LL_dwt = dwt(input_LL)
-        input_LL_LL, input_high1 = input_LL_dwt[:n, ...], input_LL_dwt[n:, ...]
+        input_LL1_dwt = dwt(input_LL1)
+        input_LL2, input_high1 = input_LL1_dwt[:n, ...], input_LL1_dwt[n:, ...]
         input_high1 = self.high_enhance1(input_high1)
 
         b = self.betas.to(input_img.device)
 
-        t = torch.randint(low=0, high=self.num_timesteps, size=(input_LL_LL.shape[0] // 2 + 1,)).to(self.device)
-        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:input_LL_LL.shape[0]].to(x.device)
+        t = torch.randint(low=0, high=self.num_timesteps, size=(input_LL2.shape[0] // 2 + 1,)).to(self.device)
+        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:input_LL2.shape[0]].to(x.device)
         a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
 
-        e = torch.randn_like(input_LL_LL)
+        e = torch.randn_like(input_LL2)
 
         if self.training or return_loss_terms:
             gt_img_norm = data_transform(x[:, 3:, :, :])
             gt_dwt = dwt(gt_img_norm)
-            gt_LL, gt_high0 = gt_dwt[:n, ...], gt_dwt[n:, ...]
+            gt_LL1, gt_high0 = gt_dwt[:n, ...], gt_dwt[n:, ...]
 
-            gt_LL_dwt = dwt(gt_LL)
-            gt_LL_LL, gt_high1 = gt_LL_dwt[:n, ...], gt_LL_dwt[n:, ...]
+            gt_LL1_dwt = dwt(gt_LL1)
+            gt_LL2, gt_high1 = gt_LL1_dwt[:n, ...], gt_LL1_dwt[n:, ...]
 
-            x = gt_LL_LL * a.sqrt() + e * (1.0 - a).sqrt()
-            noise_output = self.Unet(torch.cat([input_LL_LL, x], dim=1), t.float())
-            denoise_LL_LL = self.sample_training(input_LL_LL, b)
+            x = gt_LL2 * a.sqrt() + e * (1.0 - a).sqrt()
+            noise_output = self.Unet(torch.cat([input_LL2, x], dim=1), t.float())
+            denoise_LL2 = self.sample_training(input_LL2, b)
 
-            pred_LL = idwt(torch.cat((denoise_LL_LL, input_high1), dim=0))
+            pred_LL1 = idwt(torch.cat((denoise_LL2, input_high1), dim=0))
 
-            pred_x = idwt(torch.cat((pred_LL, input_high0), dim=0))
+            pred_x = idwt(torch.cat((pred_LL1, input_high0), dim=0))
             pred_x = inverse_data_transform(pred_x)
 
             data_dict["input_high0"] = input_high0
             data_dict["input_high1"] = input_high1
             data_dict["gt_high0"] = gt_high0
             data_dict["gt_high1"] = gt_high1
-            data_dict["pred_LL"] = pred_LL
-            data_dict["gt_LL"] = gt_LL
+            data_dict["pred_LL1"] = pred_LL1
+            data_dict["gt_LL1"] = gt_LL1
+            data_dict["pred_LL2"] = denoise_LL2
+            data_dict["gt_LL2"] = gt_LL2
             data_dict["noise_output"] = noise_output
             data_dict["pred_x"] = pred_x
             data_dict["e"] = e
 
         else:
-            denoise_LL_LL = self.sample_training(input_LL_LL, b)
-            pred_LL = idwt(torch.cat((denoise_LL_LL, input_high1), dim=0))
-            pred_x = idwt(torch.cat((pred_LL, input_high0), dim=0))
+            denoise_LL2 = self.sample_training(input_LL2, b)
+            pred_LL1 = idwt(torch.cat((denoise_LL2, input_high1), dim=0))
+            pred_x = idwt(torch.cat((pred_LL1, input_high0), dim=0))
             pred_x = inverse_data_transform(pred_x)
 
             data_dict["pred_x"] = pred_x
@@ -328,9 +331,35 @@ class DenoisingDiffusion(object):
             totals[key] /= batches
         return totals
 
+    @staticmethod
+    def _append_loss_log(csv_path, row):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        write_header = not os.path.exists(csv_path)
+        fieldnames = [
+            'epoch',
+            'step',
+            'train_total_loss',
+            'train_noise_loss',
+            'train_photo_loss',
+            'train_frequency_loss',
+            'val_total_loss',
+            'val_noise_loss',
+            'val_photo_loss',
+            'val_frequency_loss',
+            'best_val_loss',
+        ]
+        with open(csv_path, 'a', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
     def train(self, DATASET):
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
+        latest_ckpt_name = getattr(self.config.training, 'latest_ckpt_name', 'model_latest')
+        best_ckpt_name = getattr(self.config.training, 'best_ckpt_name', 'model_bestbest')
+        loss_log_path = os.path.join(self.config.data.ckpt_dir, 'loss_log.csv')
 
         if os.path.isfile(self.args.resume):
             self.load_ddm_ckpt(self.args.resume)
@@ -339,6 +368,13 @@ class DenoisingDiffusion(object):
             print('epoch: ', epoch)
             data_start = time.time()
             data_time = 0
+            train_sums = {
+                'noise_loss': 0.0,
+                'photo_loss': 0.0,
+                'frequency_loss': 0.0,
+                'total_loss': 0.0,
+            }
+            train_batches = 0
             for i, (x, y) in enumerate(train_loader):
                 x = x.flatten(start_dim=0, end_dim=1) if x.ndim == 5 else x
                 data_time += time.time() - data_start
@@ -352,6 +388,11 @@ class DenoisingDiffusion(object):
                 noise_loss, photo_loss, frequency_loss, photo_metrics = self.estimation_loss(x, output)
 
                 loss = noise_loss + photo_loss + frequency_loss
+                train_sums['noise_loss'] += noise_loss.item()
+                train_sums['photo_loss'] += photo_loss.item()
+                train_sums['frequency_loss'] += frequency_loss.item()
+                train_sums['total_loss'] += loss.item()
+                train_batches += 1
                 if self.step % 10 == 0:
                     print("step:{}, lr:{:.6f}, noise_loss:{:.4f}, photo_loss:{:.4f}, "
                           "frequency_loss:{:.4f}, mse_loss:{:.6f}, ssim_loss:{:.6f}, lpips_loss:{:.8f}, lpips_enabled:{}".format(
@@ -383,36 +424,76 @@ class DenoisingDiffusion(object):
                     ))
                     self.sample_validation_patches(val_loader, self.step)
 
-                    if val_losses['total_loss'] < self.best_val_loss:
+                    is_best = val_losses['total_loss'] < self.best_val_loss
+                    if is_best:
                         self.best_val_loss = val_losses['total_loss']
-                        checkpoint_state = self._checkpoint_state(epoch)
+
+                    checkpoint_state = self._checkpoint_state(epoch)
+                    utils.logging.save_checkpoint(
+                        checkpoint_state,
+                        filename=os.path.join(self.config.data.ckpt_dir, latest_ckpt_name)
+                    )
+
+                    if is_best:
                         utils.logging.save_checkpoint(
                             checkpoint_state,
-                            filename=os.path.join(self.config.data.ckpt_dir, 'model_latest')
-                        )
-                        utils.logging.save_checkpoint(
-                            checkpoint_state,
-                            filename=os.path.join(self.config.data.ckpt_dir, 'model_best')
+                            filename=os.path.join(self.config.data.ckpt_dir, best_ckpt_name)
                         )
                         print("=> saved new best checkpoint at step {} with val_loss {:.6f}".format(
                             self.step,
                             self.best_val_loss,
                         ))
                     else:
-                        print("=> skipped checkpoint save because val_loss {:.6f} did not beat best {:.6f}".format(
+                        print("=> saved latest; skipped best because val_loss {:.6f} did not beat best {:.6f}".format(
                             val_losses['total_loss'],
                             self.best_val_loss,
                         ))
-                        
+
             self.scheduler.step()
+
+            if train_batches > 0:
+                train_means = {key: value / train_batches for key, value in train_sums.items()}
+            else:
+                train_means = train_sums
+
+            epoch_val_losses = self.validate(val_loader)
+            print(
+                "epoch summary:{} | train_total:{:.4f}, train_noise:{:.4f}, train_photo:{:.4f}, train_frequency:{:.4f} | "
+                "val_total:{:.4f}, val_noise:{:.4f}, val_photo:{:.4f}, val_frequency:{:.4f}".format(
+                    epoch + 1,
+                    train_means['total_loss'],
+                    train_means['noise_loss'],
+                    train_means['photo_loss'],
+                    train_means['frequency_loss'],
+                    epoch_val_losses['total_loss'],
+                    epoch_val_losses['noise_loss'],
+                    epoch_val_losses['photo_loss'],
+                    epoch_val_losses['frequency_loss'],
+                )
+            )
+
+            self._append_loss_log(loss_log_path, {
+                'epoch': epoch + 1,
+                'step': self.step,
+                'train_total_loss': f"{train_means['total_loss']:.6f}",
+                'train_noise_loss': f"{train_means['noise_loss']:.6f}",
+                'train_photo_loss': f"{train_means['photo_loss']:.6f}",
+                'train_frequency_loss': f"{train_means['frequency_loss']:.6f}",
+                'val_total_loss': f"{epoch_val_losses['total_loss']:.6f}",
+                'val_noise_loss': f"{epoch_val_losses['noise_loss']:.6f}",
+                'val_photo_loss': f"{epoch_val_losses['photo_loss']:.6f}",
+                'val_frequency_loss': f"{epoch_val_losses['frequency_loss']:.6f}",
+                'best_val_loss': f"{self.best_val_loss:.6f}",
+            })
 
     def estimation_loss(self, x, output):
 
         input_high0, input_high1, gt_high0, gt_high1 = output["input_high0"], output["input_high1"],\
                                                        output["gt_high0"], output["gt_high1"]
 
-        pred_LL, gt_LL, pred_x, noise_output, e = output["pred_LL"], output["gt_LL"], output["pred_x"],\
-                                                  output["noise_output"], output["e"]
+        pred_LL1, gt_LL1 = output["pred_LL1"], output["gt_LL1"]
+        pred_LL2, gt_LL2 = output["pred_LL2"], output["gt_LL2"]
+        pred_x, noise_output, e = output["pred_x"], output["noise_output"], output["e"]
 
         gt_img = x[:, 3:, :, :].to(self.device)
         # =============noise loss==================
@@ -421,10 +502,12 @@ class DenoisingDiffusion(object):
         # =============frequency loss==================
         frequency_loss = 0.1 * (self.l2_loss(input_high0, gt_high0) +
                                 self.l2_loss(input_high1, gt_high1) +
-                                self.l2_loss(pred_LL, gt_LL)) +\
-                         0.01 * (self.TV_loss(input_high0) +
-                                 self.TV_loss(input_high1) +
-                                 self.TV_loss(pred_LL))
+                    self.l2_loss(pred_LL1, gt_LL1) +
+                    self.l2_loss(pred_LL2, gt_LL2)) +\
+                 0.01 * (self.TV_loss(input_high0) +
+                     self.TV_loss(input_high1) +
+                     self.TV_loss(pred_LL1) +
+                     self.TV_loss(pred_LL2))
 
         # =============photo loss==================
         content_loss = self.l2_loss(pred_x, gt_img)

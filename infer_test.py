@@ -25,6 +25,8 @@ def parse_args_and_config():
                         help="Directory to save restored test images")
     parser.add_argument("--output_ext", default="webp", choices=["png", "webp"],
                         help="Output image extension for submission files")
+    parser.add_argument("--tta", action="store_true",
+                        help="Enable test-time augmentation with horizontal/vertical flips")
     parser.add_argument("--seed", default=230, type=int, metavar="N",
                         help="Seed for initializing inference")
     args = parser.parse_args()
@@ -68,13 +70,31 @@ def load_model(args, config):
     return diffusion
 
 
-def restore_test_image(diffusion, x_cond):
+def _flip_batch(x, flip_h=False, flip_v=False):
+    if flip_h:
+        x = torch.flip(x, dims=[3])
+    if flip_v:
+        x = torch.flip(x, dims=[2])
+    return x
+
+
+def restore_test_image(diffusion, x_cond, use_tta=False):
     batch, channels, height, width = x_cond.shape
     padded_height = int(32 * np.ceil(height / 32.0))
     padded_width = int(32 * np.ceil(width / 32.0))
     x_cond = F.pad(x_cond, (0, padded_width - width, 0, padded_height - height), "reflect")
-    x_output = diffusion.model(x_cond)
-    pred = x_output["pred_x"]
+    if use_tta:
+        preds = []
+        for flip_h, flip_v in [(False, False), (True, False), (False, True), (True, True)]:
+            augmented = _flip_batch(x_cond, flip_h=flip_h, flip_v=flip_v)
+            x_output = diffusion.model(augmented)
+            pred = x_output["pred_x"]
+            pred = _flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
+            preds.append(pred)
+        pred = torch.stack(preds, dim=0).mean(dim=0)
+    else:
+        x_output = diffusion.model(x_cond)
+        pred = x_output["pred_x"]
     return pred[:, :, :height, :width]
 
 
@@ -111,7 +131,7 @@ def main():
     with torch.no_grad():
         for x_cond, stem in test_loader:
             x_cond = x_cond.to(diffusion.device)
-            pred = restore_test_image(diffusion, x_cond)
+            pred = restore_test_image(diffusion, x_cond, use_tta=args.tta)
             output_path = output_dir / f"{stem[0]}-in.{args.output_ext}"
             save_image(pred, str(output_path))
             print(f"saved {output_path.name}")

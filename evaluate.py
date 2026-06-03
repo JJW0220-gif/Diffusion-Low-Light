@@ -25,6 +25,8 @@ def parse_args_and_config():
                         help="Location to save restored images")
     parser.add_argument('--require_lpips', action='store_true',
                         help='Fail evaluation if LPIPS is unavailable instead of silently skipping it')
+    parser.add_argument('--tta', action='store_true',
+                        help='Enable test-time augmentation with horizontal/vertical flips')
     parser.add_argument('--seed', default=230, type=int, metavar='N',
                         help='Seed for initializing training (default: 230)')
     args = parser.parse_args()

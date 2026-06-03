@@ -1,5 +1,6 @@
 import os
 import time
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,7 +26,7 @@ class TVLoss(nn.Module):
         super(TVLoss, self).__init__()
         self.TVLoss_weight = TVLoss_weight
 
-    def forward(self, x):
+    def forward(self, x, return_loss_terms=False):
         batch_size = x.size()[0]
         h_x = x.size()[2]
         w_x = x.size()[3]
@@ -182,7 +183,7 @@ class Net(nn.Module):
 
         e = torch.randn_like(input_LL_LL)
 
-        if self.training:
+        if self.training or return_loss_terms:
             gt_img_norm = data_transform(x[:, 3:, :, :])
             gt_dwt = dwt(gt_img_norm)
             gt_LL, gt_high0 = gt_dwt[:n, ...], gt_dwt[n:, ...]
@@ -244,14 +245,76 @@ class DenoisingDiffusion(object):
     def load_ddm_ckpt(self, load_path, ema=False):
         checkpoint = utils.logging.load_checkpoint(load_path, None)
         self.model.load_state_dict(checkpoint['state_dict'], strict=True)
-        self.ema_helper.load_state_dict(checkpoint['ema_helper'])
+        if 'ema_helper' in checkpoint:
+            self.ema_helper.load_state_dict(checkpoint['ema_helper'])
+        if 'optimizer' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'scheduler' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler'])
+        self.start_epoch = checkpoint.get('epoch', 0)
+        self.step = checkpoint.get('step', 0)
         if ema:
             self.ema_helper.ema(self.model)
         print("=> loaded checkpoint {} step {}".format(load_path, self.step))
 
+    def validate(self, val_loader):
+        totals = {
+            'noise_loss': 0.0,
+            'photo_loss': 0.0,
+            'frequency_loss': 0.0,
+            'total_loss': 0.0,
+        }
+        batches = 0
+
+        self.model.eval()
+        with torch.no_grad():
+            for x, _ in val_loader:
+                x = x.flatten(start_dim=0, end_dim=1) if x.ndim == 5 else x
+                x = x.to(self.device)
+
+                output = self.model(x, return_loss_terms=True)
+                noise_loss, photo_loss, frequency_loss = self.estimation_loss(x, output)
+                total_loss = noise_loss + photo_loss + frequency_loss
+
+                totals['noise_loss'] += noise_loss.item()
+                totals['photo_loss'] += photo_loss.item()
+                totals['frequency_loss'] += frequency_loss.item()
+                totals['total_loss'] += total_loss.item()
+                batches += 1
+
+        if batches == 0:
+            return totals
+
+        for key in totals:
+            totals[key] /= batches
+        return totals
+
+    @staticmethod
+    def _append_loss_log(csv_path, row):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        write_header = not os.path.exists(csv_path)
+        fieldnames = [
+            'epoch',
+            'step',
+            'train_total_loss',
+            'train_noise_loss',
+            'train_photo_loss',
+            'train_frequency_loss',
+            'val_total_loss',
+            'val_noise_loss',
+            'val_photo_loss',
+            'val_frequency_loss',
+        ]
+        with open(csv_path, 'a', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
     def train(self, DATASET):
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
+        loss_log_path = os.path.join(self.config.data.ckpt_dir, 'loss_log.csv')
 
         if os.path.isfile(self.args.resume):
             self.load_ddm_ckpt(self.args.resume)
@@ -260,6 +323,13 @@ class DenoisingDiffusion(object):
             print('epoch: ', epoch)
             data_start = time.time()
             data_time = 0
+            train_sums = {
+                'noise_loss': 0.0,
+                'photo_loss': 0.0,
+                'frequency_loss': 0.0,
+                'total_loss': 0.0,
+            }
+            train_batches = 0
             for i, (x, y) in enumerate(train_loader):
                 x = x.flatten(start_dim=0, end_dim=1) if x.ndim == 5 else x
                 data_time += time.time() - data_start
@@ -273,6 +343,11 @@ class DenoisingDiffusion(object):
                 noise_loss, photo_loss, frequency_loss = self.estimation_loss(x, output)
 
                 loss = noise_loss + photo_loss + frequency_loss
+                train_sums['noise_loss'] += noise_loss.item()
+                train_sums['photo_loss'] += photo_loss.item()
+                train_sums['frequency_loss'] += frequency_loss.item()
+                train_sums['total_loss'] += loss.item()
+                train_batches += 1
                 if self.step % 10 == 0:
                     print("step:{}, lr:{:.6f}, noise_loss:{:.4f}, photo_loss:{:.4f}, "
                           "frequency_loss:{:.4f}".format(self.step, self.scheduler.get_last_lr()[0],
@@ -297,8 +372,42 @@ class DenoisingDiffusion(object):
                                                    'params': self.args,
                                                    'config': self.config},
                                                   filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
-                        
+
             self.scheduler.step()
+
+            if train_batches > 0:
+                train_means = {key: value / train_batches for key, value in train_sums.items()}
+            else:
+                train_means = train_sums
+
+            epoch_val_losses = self.validate(val_loader)
+            print(
+                "epoch summary:{} | train_total:{:.4f}, train_noise:{:.4f}, train_photo:{:.4f}, train_frequency:{:.4f} | "
+                "val_total:{:.4f}, val_noise:{:.4f}, val_photo:{:.4f}, val_frequency:{:.4f}".format(
+                    epoch + 1,
+                    train_means['total_loss'],
+                    train_means['noise_loss'],
+                    train_means['photo_loss'],
+                    train_means['frequency_loss'],
+                    epoch_val_losses['total_loss'],
+                    epoch_val_losses['noise_loss'],
+                    epoch_val_losses['photo_loss'],
+                    epoch_val_losses['frequency_loss'],
+                )
+            )
+
+            self._append_loss_log(loss_log_path, {
+                'epoch': epoch + 1,
+                'step': self.step,
+                'train_total_loss': f"{train_means['total_loss']:.6f}",
+                'train_noise_loss': f"{train_means['noise_loss']:.6f}",
+                'train_photo_loss': f"{train_means['photo_loss']:.6f}",
+                'train_frequency_loss': f"{train_means['frequency_loss']:.6f}",
+                'val_total_loss': f"{epoch_val_losses['total_loss']:.6f}",
+                'val_noise_loss': f"{epoch_val_losses['noise_loss']:.6f}",
+                'val_photo_loss': f"{epoch_val_losses['photo_loss']:.6f}",
+                'val_frequency_loss': f"{epoch_val_losses['frequency_loss']:.6f}",
+            })
 
     def estimation_loss(self, x, output):
 

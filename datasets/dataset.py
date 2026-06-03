@@ -148,7 +148,8 @@ class LLdataset:
     def get_loaders(self, parse_patches=True):
         train_transform = PairedCompose([
             PairedRandomCrop(self.config.data.patch_size),
-            PairedRandomFlip(p_h=0.5),
+            PairedRandomFlip(p_h=0.5, p_v=0.5),
+            PairedRandomRotate90(p=0.5),
             PairedToTensor(),
         ])
         train_dataset = _CompatPairedDataset(_resolve_split_root(self.config, "train"), transform=train_transform)
@@ -223,6 +224,22 @@ class PairedRandomFlip:
         return a, b
 
 
+class PairedRandomRotate90:
+    paired = True
+
+    def __init__(self, p: float = 0.5):
+        self.p = p
+
+    def __call__(self, a, b):
+        if random.random() < self.p:
+            # 90-degree rotations preserve rectangular geometry without interpolation artifacts.
+            k = random.choice([1, 2, 3])
+            angle = 90 * k
+            a = TF.rotate(a, angle)
+            b = TF.rotate(b, angle)
+        return a, b
+
+
 class PairedToTensor:
     paired = True
 
@@ -241,7 +258,8 @@ if __name__ == "__main__":
 
     train_tf = PairedCompose([
         PairedRandomCrop(256),
-        PairedRandomFlip(p_h=0.5),
+        PairedRandomFlip(p_h=0.5, p_v=0.5),
+        PairedRandomRotate90(p=0.5),
         PairedToTensor(),
     ])
 

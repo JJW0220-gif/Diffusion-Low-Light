@@ -43,6 +43,33 @@ class DiffusiveRestoration:
             print('=> Evaluation metrics: PSNR, SSIM (LPIPS disabled; lpips package not installed)')
 
     @staticmethod
+    def _flip_batch(x, flip_h=False, flip_v=False):
+        if flip_h:
+            x = torch.flip(x, dims=[3])
+        if flip_v:
+            x = torch.flip(x, dims=[2])
+        return x
+
+    def _predict(self, x_cond):
+        x_output = self.diffusion.model(x_cond)
+        return x_output["pred_x"]
+
+    def _tta_predict(self, x_cond):
+        variants = [
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ]
+        preds = []
+        for flip_h, flip_v in variants:
+            augmented = self._flip_batch(x_cond, flip_h=flip_h, flip_v=flip_v)
+            pred = self._predict(augmented)
+            pred = self._flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
+            preds.append(pred)
+        return torch.stack(preds, dim=0).mean(dim=0)
+
+    @staticmethod
     def _compute_psnr(pred, target):
         mse = torch.mean((pred - target) ** 2)
         if mse <= 0:
@@ -100,6 +127,7 @@ class DiffusiveRestoration:
                 handle.write(f"{key}: {value:.6f}\n")
 
     def diffusive_restoration(self, x_cond):
-        x_output = self.diffusion.model(x_cond)
-        return x_output["pred_x"]
+        if getattr(self.args, 'tta', False):
+            return self._tta_predict(x_cond)
+        return self._predict(x_cond)
 
