@@ -11,7 +11,8 @@ import torchvision
 import models
 import datasets
 import utils
-from models.ddm2 import DenoisingDiffusion
+from models.ddm import DenoisingDiffusion as DenoisingDiffusionDDPM
+from models.ddm2 import DenoisingDiffusion as DenoisingDiffusionDDPM2
 
 
 def parse_args_and_config():
@@ -67,7 +68,25 @@ def main():
 
     # create model
     print("=> creating denoising-diffusion model...")
-    diffusion = DenoisingDiffusion(args, config)
+    ckpt_dir_name = os.path.basename(os.path.normpath(config.data.ckpt_dir)).lower()
+    model_variant = getattr(config.training, "model_variant", "")
+    model_variant = model_variant.lower() if isinstance(model_variant, str) else ""
+
+    if model_variant in {"ddpm", "ddm"}:
+        diffusion_cls = DenoisingDiffusionDDPM
+        selected = "ddpm"
+    elif model_variant in {"ddpm2", "ddm2"}:
+        diffusion_cls = DenoisingDiffusionDDPM2
+        selected = "ddpm2"
+    elif ckpt_dir_name == "ckpt2":
+        diffusion_cls = DenoisingDiffusionDDPM2
+        selected = "ddpm2"
+    else:
+        diffusion_cls = DenoisingDiffusionDDPM
+        selected = "ddpm"
+
+    print(f"=> model variant: {selected} (ckpt_dir={config.data.ckpt_dir})")
+    diffusion = diffusion_cls(args, config)
     diffusion.train(DATASET)
 
 

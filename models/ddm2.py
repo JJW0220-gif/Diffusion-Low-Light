@@ -305,6 +305,9 @@ class DenoisingDiffusion(object):
             'photo_loss': 0.0,
             'frequency_loss': 0.0,
             'total_loss': 0.0,
+            'psnr': 0.0,
+            'ssim': 0.0,
+            'lpips': 0.0,
         }
         batches = 0
 
@@ -317,11 +320,29 @@ class DenoisingDiffusion(object):
                 output = self.model(x, return_loss_terms=True)
                 noise_loss, photo_loss, frequency_loss, _ = self.estimation_loss(x, output)
                 total_loss = noise_loss + photo_loss + frequency_loss
+                pred_x = output['pred_x']
+                gt_img = x[:, 3:, :, :]
+
+                mse = torch.mean((pred_x - gt_img) ** 2)
+                if mse.item() > 0:
+                    psnr = float((10.0 * torch.log10(1.0 / mse)).item())
+                else:
+                    psnr = float('inf')
+
+                ssim_value = float(ssim(pred_x, gt_img, data_range=1.0).item())
+                lpips_value = 0.0
+                if self.lpips_loss is not None:
+                    pred_norm = pred_x * 2.0 - 1.0
+                    gt_norm = gt_img * 2.0 - 1.0
+                    lpips_value = float(self.lpips_loss(pred_norm, gt_norm).mean().item())
 
                 totals['noise_loss'] += noise_loss.item()
                 totals['photo_loss'] += photo_loss.item()
                 totals['frequency_loss'] += frequency_loss.item()
                 totals['total_loss'] += total_loss.item()
+                totals['psnr'] += psnr
+                totals['ssim'] += ssim_value
+                totals['lpips'] += lpips_value
                 batches += 1
 
         if batches == 0:
@@ -346,6 +367,9 @@ class DenoisingDiffusion(object):
             'val_noise_loss',
             'val_photo_loss',
             'val_frequency_loss',
+            'val_psnr',
+            'val_ssim',
+            'val_lpips',
             'best_val_loss',
         ]
         with open(csv_path, 'a', newline='', encoding='utf-8') as handle:
@@ -460,7 +484,8 @@ class DenoisingDiffusion(object):
             epoch_val_losses = self.validate(val_loader)
             print(
                 "epoch summary:{} | train_total:{:.4f}, train_noise:{:.4f}, train_photo:{:.4f}, train_frequency:{:.4f} | "
-                "val_total:{:.4f}, val_noise:{:.4f}, val_photo:{:.4f}, val_frequency:{:.4f}".format(
+                "val_total:{:.4f}, val_noise:{:.4f}, val_photo:{:.4f}, val_frequency:{:.4f}, "
+                "val_psnr:{:.4f}, val_ssim:{:.4f}, val_lpips:{:.4f}".format(
                     epoch + 1,
                     train_means['total_loss'],
                     train_means['noise_loss'],
@@ -470,6 +495,9 @@ class DenoisingDiffusion(object):
                     epoch_val_losses['noise_loss'],
                     epoch_val_losses['photo_loss'],
                     epoch_val_losses['frequency_loss'],
+                    epoch_val_losses['psnr'],
+                    epoch_val_losses['ssim'],
+                    epoch_val_losses['lpips'],
                 )
             )
 
@@ -484,6 +512,9 @@ class DenoisingDiffusion(object):
                 'val_noise_loss': f"{epoch_val_losses['noise_loss']:.6f}",
                 'val_photo_loss': f"{epoch_val_losses['photo_loss']:.6f}",
                 'val_frequency_loss': f"{epoch_val_losses['frequency_loss']:.6f}",
+                'val_psnr': f"{epoch_val_losses['psnr']:.6f}",
+                'val_ssim': f"{epoch_val_losses['ssim']:.6f}",
+                'val_lpips': f"{epoch_val_losses['lpips']:.6f}",
                 'best_val_loss': f"{self.best_val_loss:.6f}",
             })
 

@@ -28,8 +28,9 @@ diffusion:
 
 training:
     batch_size: 8
-    n_epochs: 500
+    n_epochs: 40
     validation_freq: 1000
+    model_variant: "ddpm2"
     photo_mse_weight: 1.0
     photo_ssim_weight: 0.5
     lpips_weight: 0.05
