@@ -146,6 +146,7 @@ class LLdataset:
         self.config = config
 
     def get_loaders(self, parse_patches=True):
+        drop_last = getattr(self.config.training, "drop_last", True)
         train_transform = PairedCompose([
             PairedRandomCrop(self.config.data.patch_size),
             PairedRandomFlip(p_h=0.5, p_v=0.5),
@@ -159,6 +160,7 @@ class LLdataset:
             train_dataset,
             batch_size=self.config.training.batch_size,
             shuffle=True,
+            drop_last=drop_last,
             num_workers=self.config.data.num_workers,
             pin_memory=True,
         )

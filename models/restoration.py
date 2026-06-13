@@ -50,23 +50,57 @@ class DiffusiveRestoration:
             x = torch.flip(x, dims=[2])
         return x
 
+    @staticmethod
+    def _rotate_batch(x, quarter_turns=0):
+        quarter_turns = quarter_turns % 4
+        if quarter_turns == 0:
+            return x
+        return torch.rot90(x, k=quarter_turns, dims=[2, 3])
+
+    @staticmethod
+    def _shift_batch(x, shift_x=0, shift_y=0):
+        if shift_x == 0 and shift_y == 0:
+            return x
+
+        pad_left = max(shift_x, 0)
+        pad_right = max(-shift_x, 0)
+        pad_top = max(shift_y, 0)
+        pad_bottom = max(-shift_y, 0)
+        padded = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), mode='reflect')
+
+        start_x = pad_right
+        start_y = pad_bottom
+        end_y = start_y + x.shape[2]
+        end_x = start_x + x.shape[3]
+        return padded[:, :, start_y:end_y, start_x:end_x]
+
     def _predict(self, x_cond):
         x_output = self.diffusion.model(x_cond)
         return x_output["pred_x"]
 
     def _tta_predict(self, x_cond):
-        variants = [
-            (False, False),
-            (True, False),
-            (False, True),
-            (True, True),
-        ]
+        shift_pixels = max(0, int(getattr(self.args, 'tta_shift_pixels', 2)))
+        shift_variants = [(0, 0)]
+        if shift_pixels > 0:
+            shift_variants.extend([
+                (shift_pixels, 0),
+                (-shift_pixels, 0),
+                (0, shift_pixels),
+                (0, -shift_pixels),
+            ])
+
         preds = []
-        for flip_h, flip_v in variants:
-            augmented = self._flip_batch(x_cond, flip_h=flip_h, flip_v=flip_v)
-            pred = self._predict(augmented)
-            pred = self._flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
-            preds.append(pred)
+        for quarter_turns in range(4):
+            rotated = self._rotate_batch(x_cond, quarter_turns=quarter_turns)
+            for flip_h, flip_v in ((False, False), (True, False), (False, True), (True, True)):
+                flipped = self._flip_batch(rotated, flip_h=flip_h, flip_v=flip_v)
+                for shift_x, shift_y in shift_variants:
+                    augmented = self._shift_batch(flipped, shift_x=shift_x, shift_y=shift_y)
+                    pred = self._predict(augmented)
+                    pred = self._shift_batch(pred, shift_x=-shift_x, shift_y=-shift_y)
+                    pred = self._flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
+                    pred = self._rotate_batch(pred, quarter_turns=-quarter_turns)
+                    preds.append(pred)
         return torch.stack(preds, dim=0).mean(dim=0)
 
     @staticmethod

@@ -118,6 +118,7 @@ class Net(nn.Module):
         self.args = args
         self.config = config
         self.device = config.device
+        self.hf_soft_threshold = float(getattr(self.config.training, 'hf_soft_threshold', 0.0))
 
         self.high_enhance0 = HFRM(in_channels=3, out_channels=64)
         self.high_enhance1 = HFRM(in_channels=3, out_channels=64)
@@ -163,6 +164,12 @@ class Net(nn.Module):
 
         return xs[-1]
 
+    def _soft_threshold_high(self, high_map):
+        if self.hf_soft_threshold <= 0:
+            return high_map
+        # Soft-threshold keeps strong structures while shrinking weak noisy responses.
+        return torch.sign(high_map) * F.relu(torch.abs(high_map) - self.hf_soft_threshold)
+
     def forward(self, x, return_loss_terms=False):
         data_dict = {}
         dwt, idwt = DWT(), IWT()
@@ -173,11 +180,13 @@ class Net(nn.Module):
         input_dwt = dwt(input_img_norm)
 
         input_LL1, input_high0 = input_dwt[:n, ...], input_dwt[n:, ...]
+        input_high0 = self._soft_threshold_high(input_high0)
 
         input_high0 = self.high_enhance0(input_high0)
 
         input_LL1_dwt = dwt(input_LL1)
         input_LL2, input_high1 = input_LL1_dwt[:n, ...], input_LL1_dwt[n:, ...]
+        input_high1 = self._soft_threshold_high(input_high1)
         input_high1 = self.high_enhance1(input_high1)
 
         b = self.betas.to(input_img.device)
@@ -265,6 +274,7 @@ class DenoisingDiffusion(object):
             )
         else:
             print("=> LPIPS disabled (lpips package not installed); lpips_loss will stay at 0")
+        print(">= HF soft-threshold tau: {:.6f}".format(self.model.module.hf_soft_threshold))
 
         self.optimizer, self.scheduler = utils.optimize.get_optimizer(self.config, self.model.parameters())
         self.start_epoch, self.step = 0, 0

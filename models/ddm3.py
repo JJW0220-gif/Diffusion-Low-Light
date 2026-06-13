@@ -1,6 +1,7 @@
 import os
 import time
 import csv
+import itertools
 import numpy as np
 import torch
 import torch.nn as nn
@@ -172,53 +173,55 @@ class Net(nn.Module):
         input_img_norm = data_transform(input_img)
         input_dwt = dwt(input_img_norm)
 
-        input_LL, input_high0 = input_dwt[:n, ...], input_dwt[n:, ...]
+        input_LL1, input_high0 = input_dwt[:n, ...], input_dwt[n:, ...]
 
         input_high0 = self.high_enhance0(input_high0)
 
-        input_LL_dwt = dwt(input_LL)
-        input_LL_LL, input_high1 = input_LL_dwt[:n, ...], input_LL_dwt[n:, ...]
+        input_LL1_dwt = dwt(input_LL1)
+        input_LL2, input_high1 = input_LL1_dwt[:n, ...], input_LL1_dwt[n:, ...]
         input_high1 = self.high_enhance1(input_high1)
 
         b = self.betas.to(input_img.device)
 
-        t = torch.randint(low=0, high=self.num_timesteps, size=(input_LL_LL.shape[0] // 2 + 1,)).to(self.device)
-        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:input_LL_LL.shape[0]].to(x.device)
+        t = torch.randint(low=0, high=self.num_timesteps, size=(input_LL2.shape[0] // 2 + 1,)).to(self.device)
+        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:input_LL2.shape[0]].to(x.device)
         a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
 
-        e = torch.randn_like(input_LL_LL)
+        e = torch.randn_like(input_LL2)
 
         if self.training or return_loss_terms:
             gt_img_norm = data_transform(x[:, 3:, :, :])
             gt_dwt = dwt(gt_img_norm)
-            gt_LL, gt_high0 = gt_dwt[:n, ...], gt_dwt[n:, ...]
+            gt_LL1, gt_high0 = gt_dwt[:n, ...], gt_dwt[n:, ...]
 
-            gt_LL_dwt = dwt(gt_LL)
-            gt_LL_LL, gt_high1 = gt_LL_dwt[:n, ...], gt_LL_dwt[n:, ...]
+            gt_LL1_dwt = dwt(gt_LL1)
+            gt_LL2, gt_high1 = gt_LL1_dwt[:n, ...], gt_LL1_dwt[n:, ...]
 
-            x = gt_LL_LL * a.sqrt() + e * (1.0 - a).sqrt()
-            noise_output = self.Unet(torch.cat([input_LL_LL, x], dim=1), t.float())
-            denoise_LL_LL = self.sample_training(input_LL_LL, b)
+            x = gt_LL2 * a.sqrt() + e * (1.0 - a).sqrt()
+            noise_output = self.Unet(torch.cat([input_LL2, x], dim=1), t.float())
+            denoise_LL2 = self.sample_training(input_LL2, b)
 
-            pred_LL = idwt(torch.cat((denoise_LL_LL, input_high1), dim=0))
+            pred_LL1 = idwt(torch.cat((denoise_LL2, input_high1), dim=0))
 
-            pred_x = idwt(torch.cat((pred_LL, input_high0), dim=0))
+            pred_x = idwt(torch.cat((pred_LL1, input_high0), dim=0))
             pred_x = inverse_data_transform(pred_x)
 
             data_dict["input_high0"] = input_high0
             data_dict["input_high1"] = input_high1
             data_dict["gt_high0"] = gt_high0
             data_dict["gt_high1"] = gt_high1
-            data_dict["pred_LL"] = pred_LL
-            data_dict["gt_LL"] = gt_LL
+            data_dict["pred_LL1"] = pred_LL1
+            data_dict["gt_LL1"] = gt_LL1
+            data_dict["pred_LL2"] = denoise_LL2
+            data_dict["gt_LL2"] = gt_LL2
             data_dict["noise_output"] = noise_output
             data_dict["pred_x"] = pred_x
             data_dict["e"] = e
 
         else:
-            denoise_LL_LL = self.sample_training(input_LL_LL, b)
-            pred_LL = idwt(torch.cat((denoise_LL_LL, input_high1), dim=0))
-            pred_x = idwt(torch.cat((pred_LL, input_high0), dim=0))
+            denoise_LL2 = self.sample_training(input_LL2, b)
+            pred_LL1 = idwt(torch.cat((denoise_LL2, input_high1), dim=0))
+            pred_x = idwt(torch.cat((pred_LL1, input_high0), dim=0))
             pred_x = inverse_data_transform(pred_x)
 
             data_dict["pred_x"] = pred_x
@@ -246,6 +249,10 @@ class DenoisingDiffusion(object):
         self.photo_mse_weight = getattr(self.config.training, 'photo_mse_weight', 1.0)
         self.photo_ssim_weight = getattr(self.config.training, 'photo_ssim_weight', 0.5)
         self.lpips_weight = getattr(self.config.training, 'lpips_weight', 0.05)
+        self.ohem_ratio = float(getattr(self.config.training, 'ohem_ratio', 0.5))
+        self.ohem_min_keep = int(getattr(self.config.training, 'ohem_min_keep', 1))
+        self.ohem_ratio = max(0.0, min(1.0, self.ohem_ratio))
+        self.ohem_min_keep = max(1, self.ohem_min_keep)
         self.lpips_loss = None
         self.lpips_enabled = False
         if lpips is not None:
@@ -263,6 +270,12 @@ class DenoisingDiffusion(object):
             )
         else:
             print("=> LPIPS disabled (lpips package not installed); lpips_loss will stay at 0")
+        print(
+            ">= OHEM mode: keep middle {:.0f}% samples (min_keep={})".format(
+                self.ohem_ratio * 100.0,
+                self.ohem_min_keep,
+            )
+        )
 
         self.optimizer, self.scheduler = utils.optimize.get_optimizer(self.config, self.model.parameters())
         self.start_epoch, self.step = 0, 0
@@ -270,7 +283,20 @@ class DenoisingDiffusion(object):
 
     def load_ddm_ckpt(self, load_path, ema=False):
         checkpoint = utils.logging.load_checkpoint(load_path, None)
-        self.model.load_state_dict(checkpoint['state_dict'], strict=True)
+        model_keys = self.model.state_dict().keys()
+        ckpt_state = checkpoint['state_dict']
+
+        model_uses_module = any(k.startswith('module.') for k in model_keys)
+        ckpt_uses_module = any(k.startswith('module.') for k in ckpt_state.keys())
+
+        if model_uses_module and not ckpt_uses_module:
+            ckpt_state = {f"module.{k}": v for k, v in ckpt_state.items()}
+        elif ckpt_uses_module and not model_uses_module:
+            ckpt_state = {
+                (k[7:] if k.startswith('module.') else k): v for k, v in ckpt_state.items()
+            }
+
+        self.model.load_state_dict(ckpt_state, strict=True)
         if 'ema_helper' in checkpoint:
             self.ema_helper.load_state_dict(checkpoint['ema_helper'])
         if 'optimizer' in checkpoint:
@@ -368,6 +394,10 @@ class DenoisingDiffusion(object):
             'val_psnr',
             'val_ssim',
             'val_lpips',
+            'best_val_loss',
+            'train_ohem_keep_ratio',
+            'train_ohem_kept',
+            'train_ohem_total',
         ]
         with open(csv_path, 'a', newline='', encoding='utf-8') as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -375,18 +405,56 @@ class DenoisingDiffusion(object):
                 writer.writeheader()
             writer.writerow(row)
 
+    def _select_ohem_batch(self, x, output):
+        batch_size = x.shape[0]
+        if self.ohem_ratio >= 1.0 or batch_size <= self.ohem_min_keep:
+            return x, output, batch_size, batch_size
+
+        keep = int(np.ceil(batch_size * self.ohem_ratio))
+        keep = min(batch_size, max(self.ohem_min_keep, keep))
+        if keep >= batch_size:
+            return x, output, batch_size, batch_size
+
+        with torch.no_grad():
+            gt_img = x[:, 3:, :, :]
+            pred_x = output['pred_x'].detach()
+            per_sample_mse = torch.mean((pred_x - gt_img) ** 2, dim=(1, 2, 3))
+            sorted_indices = torch.argsort(per_sample_mse, descending=False)
+            start = (batch_size - keep) // 2
+            hard_indices = sorted_indices[start:start + keep]
+
+        x_hard = x.index_select(0, hard_indices)
+        output_hard = {}
+        for key, value in output.items():
+            if torch.is_tensor(value) and value.shape[0] == batch_size:
+                output_hard[key] = value.index_select(0, hard_indices)
+            else:
+                output_hard[key] = value
+
+        return x_hard, output_hard, keep, batch_size
+
     def train(self, DATASET):
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
         latest_ckpt_name = getattr(self.config.training, 'latest_ckpt_name', 'model_latest')
         best_ckpt_name = getattr(self.config.training, 'best_ckpt_name', 'model_bestbest')
-        loss_log_name = getattr(self.config.training, 'loss_log_name', 'loss_log_ddm.csv')
+        loss_log_name = getattr(self.config.training, 'loss_log_name', 'loss_log_ddm3.csv')
         loss_log_path = os.path.join(self.config.data.ckpt_dir, loss_log_name)
 
-        if os.path.isfile(self.args.resume):
-            self.load_ddm_ckpt(self.args.resume)
+        if self.args.resume:
+            if os.path.isfile(self.args.resume):
+                self.load_ddm_ckpt(self.args.resume)
+            else:
+                raise FileNotFoundError(f"Resume checkpoint path is missing: {self.args.resume}")
 
-        for epoch in range(self.start_epoch, self.config.training.n_epochs):
+        max_epochs = int(getattr(self.config.training, 'n_epochs', 0))
+        if max_epochs > 0:
+            epoch_iterator = range(self.start_epoch, max_epochs)
+        else:
+            print(">= n_epochs <= 0, training without epoch limit. Stop manually when needed.")
+            epoch_iterator = itertools.count(self.start_epoch)
+
+        for epoch in epoch_iterator:
             print('epoch: ', epoch)
             data_start = time.time()
             data_time = 0
@@ -395,6 +463,8 @@ class DenoisingDiffusion(object):
                 'photo_loss': 0.0,
                 'frequency_loss': 0.0,
                 'total_loss': 0.0,
+                'ohem_kept': 0.0,
+                'ohem_total': 0.0,
             }
             train_batches = 0
             for i, (x, y) in enumerate(train_loader):
@@ -406,18 +476,22 @@ class DenoisingDiffusion(object):
                 x = x.to(self.device)
 
                 output = self.model(x)
+                x_for_loss, output_for_loss, hard_kept, hard_total = self._select_ohem_batch(x, output)
 
-                noise_loss, photo_loss, frequency_loss, photo_metrics = self.estimation_loss(x, output)
+                noise_loss, photo_loss, frequency_loss, photo_metrics = self.estimation_loss(x_for_loss, output_for_loss)
 
                 loss = noise_loss + photo_loss + frequency_loss
                 train_sums['noise_loss'] += noise_loss.item()
                 train_sums['photo_loss'] += photo_loss.item()
                 train_sums['frequency_loss'] += frequency_loss.item()
                 train_sums['total_loss'] += loss.item()
+                train_sums['ohem_kept'] += float(hard_kept)
+                train_sums['ohem_total'] += float(hard_total)
                 train_batches += 1
                 if self.step % 10 == 0:
                     print("step:{}, lr:{:.6f}, noise_loss:{:.4f}, photo_loss:{:.4f}, "
-                          "frequency_loss:{:.4f}, mse_loss:{:.6f}, ssim_loss:{:.6f}, lpips_loss:{:.8f}, lpips_enabled:{}".format(
+                          "frequency_loss:{:.4f}, mse_loss:{:.6f}, ssim_loss:{:.6f}, lpips_loss:{:.8f}, "
+                          "lpips_enabled:{}, ohem_kept:{}/{}".format(
                               self.step,
                               self.scheduler.get_last_lr()[0],
                               noise_loss.item(),
@@ -427,6 +501,8 @@ class DenoisingDiffusion(object):
                               photo_metrics['ssim_loss'].item(),
                               photo_metrics['lpips_loss'].item(),
                               self.lpips_enabled,
+                              hard_kept,
+                              hard_total,
                           ))
 
                 self.optimizer.zero_grad()
@@ -478,6 +554,10 @@ class DenoisingDiffusion(object):
             else:
                 train_means = train_sums
 
+            train_ohem_keep_ratio = 1.0
+            if train_means['ohem_total'] > 0:
+                train_ohem_keep_ratio = train_means['ohem_kept'] / train_means['ohem_total']
+
             epoch_val_losses = self.validate(val_loader)
             print(
                 "epoch summary:{} | train_total:{:.4f}, train_noise:{:.4f}, train_photo:{:.4f}, train_frequency:{:.4f} | "
@@ -512,6 +592,10 @@ class DenoisingDiffusion(object):
                 'val_psnr': f"{epoch_val_losses['psnr']:.6f}",
                 'val_ssim': f"{epoch_val_losses['ssim']:.6f}",
                 'val_lpips': f"{epoch_val_losses['lpips']:.6f}",
+                'best_val_loss': f"{self.best_val_loss:.6f}",
+                'train_ohem_keep_ratio': f"{train_ohem_keep_ratio:.6f}",
+                'train_ohem_kept': f"{train_means['ohem_kept']:.6f}",
+                'train_ohem_total': f"{train_means['ohem_total']:.6f}",
             })
 
     def estimation_loss(self, x, output):
@@ -519,8 +603,9 @@ class DenoisingDiffusion(object):
         input_high0, input_high1, gt_high0, gt_high1 = output["input_high0"], output["input_high1"],\
                                                        output["gt_high0"], output["gt_high1"]
 
-        pred_LL, gt_LL, pred_x, noise_output, e = output["pred_LL"], output["gt_LL"], output["pred_x"],\
-                                                  output["noise_output"], output["e"]
+        pred_LL1, gt_LL1 = output["pred_LL1"], output["gt_LL1"]
+        pred_LL2, gt_LL2 = output["pred_LL2"], output["gt_LL2"]
+        pred_x, noise_output, e = output["pred_x"], output["noise_output"], output["e"]
 
         gt_img = x[:, 3:, :, :].to(self.device)
         # =============noise loss==================
@@ -529,10 +614,12 @@ class DenoisingDiffusion(object):
         # =============frequency loss==================
         frequency_loss = 0.1 * (self.l2_loss(input_high0, gt_high0) +
                                 self.l2_loss(input_high1, gt_high1) +
-                                self.l2_loss(pred_LL, gt_LL)) +\
-                         0.01 * (self.TV_loss(input_high0) +
-                                 self.TV_loss(input_high1) +
-                                 self.TV_loss(pred_LL))
+                    self.l2_loss(pred_LL1, gt_LL1) +
+                    self.l2_loss(pred_LL2, gt_LL2)) +\
+                 0.01 * (self.TV_loss(input_high0) +
+                     self.TV_loss(input_high1) +
+                     self.TV_loss(pred_LL1) +
+                     self.TV_loss(pred_LL2))
 
         # =============photo loss==================
         content_loss = self.l2_loss(pred_x, gt_img)

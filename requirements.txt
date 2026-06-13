@@ -7,3 +7,4 @@ Pillow
 PyYAML
 pytorch-msssim
 lpips
+thop

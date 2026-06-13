@@ -13,6 +13,7 @@ import datasets
 import utils
 from models.ddm import DenoisingDiffusion as DenoisingDiffusionDDPM
 from models.ddm2 import DenoisingDiffusion as DenoisingDiffusionDDPM2
+from models.ddm3 import DenoisingDiffusion as DenoisingDiffusionDDPM3
 
 
 def parse_args_and_config():
@@ -78,9 +79,15 @@ def main():
     elif model_variant in {"ddpm2", "ddm2"}:
         diffusion_cls = DenoisingDiffusionDDPM2
         selected = "ddpm2"
+    elif model_variant in {"ddpm3", "ddm3"}:
+        diffusion_cls = DenoisingDiffusionDDPM3
+        selected = "ddpm3"
     elif ckpt_dir_name == "ckpt2":
         diffusion_cls = DenoisingDiffusionDDPM2
         selected = "ddpm2"
+    elif ckpt_dir_name == "chk3":
+        diffusion_cls = DenoisingDiffusionDDPM3
+        selected = "ddpm3"
     else:
         diffusion_cls = DenoisingDiffusionDDPM
         selected = "ddpm"

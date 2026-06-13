@@ -23,10 +23,12 @@ def parse_args_and_config():
                         help="Number of implicit sampling steps")
     parser.add_argument("--image_folder", default="results/submission", type=str,
                         help="Directory to save restored test images")
-    parser.add_argument("--output_ext", default="webp", choices=["png", "webp"],
+    parser.add_argument("--output_ext", default="png", choices=["png", "webp"],
                         help="Output image extension for submission files")
     parser.add_argument("--tta", action="store_true",
-                        help="Enable test-time augmentation with horizontal/vertical flips")
+                        help="Enable test-time augmentation with flips, 90-degree rotations, and small shifts")
+    parser.add_argument("--tta_shift_pixels", type=int, default=2,
+                        help="Shift magnitude in pixels used by TTA; set to 0 to disable shift variants")
     parser.add_argument("--seed", default=230, type=int, metavar="N",
                         help="Seed for initializing inference")
     args = parser.parse_args()
@@ -78,19 +80,59 @@ def _flip_batch(x, flip_h=False, flip_v=False):
     return x
 
 
+def _rotate_batch(x, quarter_turns=0):
+    quarter_turns = quarter_turns % 4
+    if quarter_turns == 0:
+        return x
+    return torch.rot90(x, k=quarter_turns, dims=[2, 3])
+
+
+def _shift_batch(x, shift_x=0, shift_y=0):
+    if shift_x == 0 and shift_y == 0:
+        return x
+
+    pad_left = max(shift_x, 0)
+    pad_right = max(-shift_x, 0)
+    pad_top = max(shift_y, 0)
+    pad_bottom = max(-shift_y, 0)
+    padded = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), mode="reflect")
+
+    start_x = pad_right
+    start_y = pad_bottom
+    end_y = start_y + x.shape[2]
+    end_x = start_x + x.shape[3]
+    return padded[:, :, start_y:end_y, start_x:end_x]
+
+
 def restore_test_image(diffusion, x_cond, use_tta=False):
     batch, channels, height, width = x_cond.shape
     padded_height = int(32 * np.ceil(height / 32.0))
     padded_width = int(32 * np.ceil(width / 32.0))
     x_cond = F.pad(x_cond, (0, padded_width - width, 0, padded_height - height), "reflect")
     if use_tta:
+        shift_pixels = max(0, int(getattr(diffusion.args, "tta_shift_pixels", 2)))
+        shift_variants = [(0, 0)]
+        if shift_pixels > 0:
+            shift_variants.extend([
+                (shift_pixels, 0),
+                (-shift_pixels, 0),
+                (0, shift_pixels),
+                (0, -shift_pixels),
+            ])
+
         preds = []
-        for flip_h, flip_v in [(False, False), (True, False), (False, True), (True, True)]:
-            augmented = _flip_batch(x_cond, flip_h=flip_h, flip_v=flip_v)
-            x_output = diffusion.model(augmented)
-            pred = x_output["pred_x"]
-            pred = _flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
-            preds.append(pred)
+        for quarter_turns in range(4):
+            rotated = _rotate_batch(x_cond, quarter_turns=quarter_turns)
+            for flip_h, flip_v in ((False, False), (True, False), (False, True), (True, True)):
+                flipped = _flip_batch(rotated, flip_h=flip_h, flip_v=flip_v)
+                for shift_x, shift_y in shift_variants:
+                    augmented = _shift_batch(flipped, shift_x=shift_x, shift_y=shift_y)
+                    x_output = diffusion.model(augmented)
+                    pred = x_output["pred_x"]
+                    pred = _shift_batch(pred, shift_x=-shift_x, shift_y=-shift_y)
+                    pred = _flip_batch(pred, flip_h=flip_h, flip_v=flip_v)
+                    pred = _rotate_batch(pred, quarter_turns=-quarter_turns)
+                    preds.append(pred)
         pred = torch.stack(preds, dim=0).mean(dim=0)
     else:
         x_output = diffusion.model(x_cond)
@@ -132,7 +174,7 @@ def main():
         for x_cond, stem in test_loader:
             x_cond = x_cond.to(diffusion.device)
             pred = restore_test_image(diffusion, x_cond, use_tta=args.tta)
-            output_path = output_dir / f"{stem[0]}-in.{args.output_ext}"
+            output_path = output_dir / f"{stem[0]}.{args.output_ext}"
             save_image(pred, str(output_path))
             print(f"saved {output_path.name}")
 
