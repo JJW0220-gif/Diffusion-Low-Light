@@ -69,3 +69,112 @@ If you use this code or ideas from the paper for your research, please cite our 
 
 ## Acknowledgement
 Part of the code is adapted from previous works: [WeatherDiff](https://github.com/IGITUGraz/WeatherDiffusion), [SDWNet](https://github.com/FlyEgle/SDWNet), and [MIMO-UNet](https://github.com/chosj95/MIMO-UNet). We thank all the authors for their contributions.
+
+---
+
+## Extended Setup and Workflow (Project Updates)
+
+This section is added for the current project branch with WebP paired data, multi-variant training, and enhanced evaluation/inference.
+
+### 1) Environment Setup
+
+Recommended:
+- Python 3.10+
+- CUDA-capable GPU
+
+Create environment (example with conda):
+
+```bash
+conda create -n lowlight python=3.10 -y
+conda activate lowlight
+pip install -r requirements.txt
+```
+
+### 2) Dataset Layout (Current)
+
+```text
+Diffusion-Low-Light/
+├── data/
+│   └── low-light/
+│       ├── train/
+│       ├── val/
+│       └── test/
+```
+
+Filename convention:
+- train/val: `<id>-in.webp` and `<id>-gt.webp`
+- test: `<id>-in.webp` only
+
+### 3) Configs and Model Variants
+
+- `configs/LowLightWebP.yml`: ddpm, checkpoints in `ckpt/`
+- `configs/LowLightWebP_ckpt2.yml`: ddpm2, checkpoints in `ckpt2/`
+- `configs/LowLightWebP_chk3.yml`: ddpm3, checkpoints in `chk3/`
+
+`train.py` and `evaluate.py` route model variants by `training.model_variant` (with `ckpt_dir` fallback).
+
+### 4) Training
+
+Train from scratch:
+
+```bash
+python train.py --config LowLightWebP.yml
+python train.py --config LowLightWebP_ckpt2.yml
+python train.py --config LowLightWebP_chk3.yml
+```
+
+Resume training:
+
+```bash
+python train.py --config LowLightWebP.yml --resume ckpt/latest.pth.tar
+python train.py --config LowLightWebP_ckpt2.yml --resume ckpt2/latest.pth.tar
+python train.py --config LowLightWebP_chk3.yml --resume chk3/latest.pth.tar
+```
+
+Notes:
+- ddpm3 validates `--resume` path strictly when provided.
+- `n_epochs: 0` in ddpm3 config means open-ended training.
+- CSV loss logs are saved per variant (for example: `loss_log_ddm.csv`, `loss_log_ddm2.csv`, `loss_log_ddm3.csv`).
+
+### 5) Evaluation
+
+Without TTA:
+
+```bash
+python evaluate.py --config LowLightWebP.yml --resume ckpt/bestbest.pth.tar --sampling_timesteps 10 --image_folder results/team_7/no_tta
+```
+
+With TTA (rotation + flip + shift):
+
+```bash
+python evaluate.py --config LowLightWebP.yml --resume ckpt/bestbest.pth.tar --sampling_timesteps 10 --tta --tta_shift_pixels 2 --image_folder results/team_7/tta_shift2
+```
+
+### 6) Test Inference (Submission Images)
+
+Default output naming in `infer_test.py` is `<id>.png`.
+
+```bash
+python infer_test.py --config LowLightWebP.yml --resume ckpt/bestbest.pth.tar --sampling_timesteps 10 --image_folder results/submission/base
+python infer_test.py --config LowLightWebP.yml --resume ckpt/bestbest.pth.tar --sampling_timesteps 10 --tta --tta_shift_pixels 2 --image_folder results/submission/tta
+```
+
+### 7) Model Size and FLOPs
+
+```bash
+python profile_model.py --config LowLightWebP_chk3.yml --height 256 --width 256 --batch-size 1 --sampling-timesteps 10
+```
+
+This reports parameters (M), MACs (G), and FLOPs (G, with 1 MAC = 2 FLOPs).
+
+### 8) Summary of Added/Modified Features
+
+- Added ddpm3 implementation and config (`models/ddm3.py`, `configs/LowLightWebP_chk3.yml`).
+- Added automatic variant routing (ddpm/ddpm2/ddpm3) in training/evaluation entry scripts.
+- Updated ddpm loss to weighted `MSE + SSIM + LPIPS`.
+- Added high-frequency soft-threshold in ddpm2 (`hf_soft_threshold`).
+- Added OHEM-based sample selection and OHEM logging fields in ddpm3.
+- Expanded TTA in restoration/inference: rotation, flip, and reflective pixel shifting.
+- Added strict checkpoint fail-fast behavior and checkpoint key compatibility handling.
+- Added profiling utility (`profile_model.py`) and `thop` dependency.
+- Added dataset loader option `training.drop_last`.
